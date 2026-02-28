@@ -1,6 +1,6 @@
-# splitwise-mcp
+Check out my [other MCP tools](https://github.com/adinschmidt/mcps)
 
-> **Looking for more?** Check out my [other MCP tools](https://github.com/adinschmidt/mcps).
+# splitwise-mcp
 
 MCP server that exposes every endpoint from Splitwise's public self-serve API docs as MCP tools.
 
