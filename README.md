@@ -1,5 +1,7 @@
 # splitwise-mcp
 
+> **Looking for more?** Check out my [other MCP tools](https://github.com/adinschmidt/mcps).
+
 MCP server that exposes every endpoint from Splitwise's public self-serve API docs as MCP tools.
 
 Current coverage from `spec/paths/index.yaml`: **27 API operations**.
