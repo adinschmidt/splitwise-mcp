@@ -1,0 +1,42 @@
+---
+post:
+  tags:
+  - expenses
+  summary: Delete an expense
+  description: "**Note**: 200 OK does not indicate a successful response. The operation
+    was successful only if `success` is true.\n"
+  parameters:
+  - in: path
+    name: id
+    description: ID of the expense to delete
+    schema:
+      type: integer
+    required: true
+  responses:
+    '200':
+      description: OK
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              errors:
+                type: object
+            required:
+              - success
+          examples:
+            Success:
+              value:
+                success: true
+            Failure:
+              value:
+                success: false
+                errors:
+                  expense:
+                  - does not exist, or has already been deleted
+    '401':
+      "$ref": "../responses/unauthorized.yaml"
+    '403':
+      "$ref": "../responses/forbidden.yaml"

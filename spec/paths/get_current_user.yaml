@@ -1,0 +1,17 @@
+---
+get:
+  tags:
+  - users
+  summary: Get information about the current user
+  responses:
+    '200':
+      description: OK
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              user:
+                "$ref": "../schemas/current_user.yaml"
+    '401':
+      "$ref": "../responses/unauthorized.yaml"
