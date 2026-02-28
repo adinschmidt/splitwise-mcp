@@ -40,7 +40,7 @@ SPLITWISE_API_KEY=your_token bunx -p /absolute/path/to/splitwise-mcp splitwise-m
 GitHub source:
 
 ```bash
-SPLITWISE_API_KEY=your_token bunx -p github:owner/repo splitwise-mcp
+SPLITWISE_API_KEY=your_token bunx -p github:adinschmidt/splitwise-mcp splitwise-mcp
 ```
 
 Note: `bunx /path/to/repo` is not supported by Bun 1.3.x. Use `-p` form above.
