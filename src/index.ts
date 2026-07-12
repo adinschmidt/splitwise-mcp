@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import YAML from "yaml";
 import * as z from "zod/v4";
 
@@ -200,6 +201,52 @@ function zodSchemaForParameter(parameter: ParameterSpec): z.ZodType {
       return z.string();
   }
 }
+
+function humanizeToolName(toolName: string): string {
+  return toolName
+    .split("_")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function buildAnnotations(operation: OperationSpec): ToolAnnotations {
+  const name = operation.toolName;
+
+  if (operation.method === "get") {
+    return { readOnlyHint: true };
+  }
+
+  if (name.startsWith("delete_") || name.startsWith("remove_")) {
+    return { destructiveHint: true, idempotentHint: true };
+  }
+
+  if (name.startsWith("undelete_")) {
+    return { destructiveHint: false, idempotentHint: true };
+  }
+
+  if (name.startsWith("create_") || name.startsWith("add_")) {
+    return { destructiveHint: false, idempotentHint: false };
+  }
+
+  if (name.startsWith("update_")) {
+    return { destructiveHint: true, idempotentHint: true };
+  }
+
+  return {};
+}
+
+const apiResultOutputSchema: Record<string, z.ZodType> = {
+  ok: z.boolean().describe("True when the HTTP status is 2xx."),
+  status: z.number().int().describe("HTTP status code."),
+  statusText: z.string(),
+  method: z.string(),
+  url: z.string(),
+  headers: z.record(z.string(), z.string()),
+  data: z
+    .unknown()
+    .describe("Parsed JSON body returned by Splitwise (or raw text when not JSON).")
+};
 
 function buildInputSchema(operation: OperationSpec): Record<string, z.ZodType> {
   const schemaShape: Record<string, z.ZodType> = {};
@@ -551,7 +598,9 @@ async function main(): Promise<void> {
 
   const server = new McpServer({
     name: SERVER_NAME,
-    version: SERVER_VERSION
+    version: SERVER_VERSION,
+    title: "Splitwise",
+    description: "MCP server exposing the Splitwise API."
   });
 
   for (const operation of operations) {
@@ -567,8 +616,11 @@ async function main(): Promise<void> {
     server.registerTool(
       operation.toolName,
       {
+        title: humanizeToolName(operation.toolName),
         description,
-        inputSchema: buildInputSchema(operation)
+        inputSchema: buildInputSchema(operation),
+        outputSchema: apiResultOutputSchema,
+        annotations: buildAnnotations(operation)
       },
       async (input) => {
         try {
@@ -597,9 +649,22 @@ async function main(): Promise<void> {
   server.registerTool(
     "splitwise_list_operations",
     {
+      title: "List Splitwise Operations",
       description:
         "List all Splitwise API operations currently exposed as MCP tools.",
-      inputSchema: {}
+      inputSchema: {},
+      outputSchema: {
+        count: z.number().int(),
+        operations: z.array(
+          z.object({
+            tool: z.string(),
+            method: z.string(),
+            path: z.string(),
+            summary: z.string()
+          })
+        )
+      },
+      annotations: { readOnlyHint: true }
     },
     async () => {
       const summary = operations.map((operation) => ({
