@@ -3,10 +3,9 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { McpServer } from "@modelcontextprotocol/server";
+import type { ToolAnnotations } from "@modelcontextprotocol/server";
 import YAML from "yaml";
 import * as z from "zod/v4";
 
@@ -236,7 +235,7 @@ function buildAnnotations(operation: OperationSpec): ToolAnnotations {
   return {};
 }
 
-const apiResultOutputSchema: Record<string, z.ZodType> = {
+const apiResultOutputSchema = z.object({
   ok: z.boolean().describe("True when the HTTP status is 2xx."),
   status: z.number().int().describe("HTTP status code."),
   statusText: z.string(),
@@ -246,9 +245,9 @@ const apiResultOutputSchema: Record<string, z.ZodType> = {
   data: z
     .unknown()
     .describe("Parsed JSON body returned by Splitwise (or raw text when not JSON).")
-};
+});
 
-function buildInputSchema(operation: OperationSpec): Record<string, z.ZodType> {
+function buildInputSchema(operation: OperationSpec): z.ZodObject {
   const schemaShape: Record<string, z.ZodType> = {};
 
   for (const parameter of [
@@ -290,7 +289,7 @@ function buildInputSchema(operation: OperationSpec): Record<string, z.ZodType> {
       : baseBodySchema.optional();
   }
 
-  return schemaShape;
+  return z.object(schemaShape);
 }
 
 function buildResolvedPath(
@@ -593,15 +592,20 @@ async function loadOperations(): Promise<OperationSpec[]> {
   return operations;
 }
 
-async function main(): Promise<void> {
-  const operations = await loadOperations();
-
-  const server = new McpServer({
-    name: SERVER_NAME,
-    version: SERVER_VERSION,
-    title: "Splitwise",
-    description: "MCP server exposing the Splitwise API."
-  });
+function buildServer(operations: OperationSpec[]): McpServer {
+  const server = new McpServer(
+    {
+      name: SERVER_NAME,
+      version: SERVER_VERSION,
+      title: "Splitwise",
+      description: "MCP server exposing the Splitwise API."
+    },
+    {
+      cacheHints: {
+        "tools/list": { ttlMs: 3_600_000, cacheScope: "public" }
+      }
+    }
+  );
 
   for (const operation of operations) {
     const description = [
@@ -652,8 +656,8 @@ async function main(): Promise<void> {
       title: "List Splitwise Operations",
       description:
         "List all Splitwise API operations currently exposed as MCP tools.",
-      inputSchema: {},
-      outputSchema: {
+      inputSchema: z.object({}),
+      outputSchema: z.object({
         count: z.number().int(),
         operations: z.array(
           z.object({
@@ -663,7 +667,7 @@ async function main(): Promise<void> {
             summary: z.string()
           })
         )
-      },
+      }),
       annotations: { readOnlyHint: true }
     },
     async () => {
@@ -696,8 +700,16 @@ async function main(): Promise<void> {
     }
   );
 
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  return server;
+}
+
+async function main(): Promise<void> {
+  const operations = await loadOperations();
+  serveStdio(() => buildServer(operations), {
+    onerror: (error) => {
+      console.error("splitwise-mcp serving error", error);
+    }
+  });
 }
 
 main().catch((error) => {
