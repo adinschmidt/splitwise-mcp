@@ -705,7 +705,11 @@ function buildServer(operations: OperationSpec[]): McpServer {
 
 async function main(): Promise<void> {
   const operations = await loadOperations();
-  serveStdio(() => buildServer(operations));
+  serveStdio(() => buildServer(operations), {
+    onerror: (error) => {
+      console.error("splitwise-mcp serving error", error);
+    }
+  });
 }
 
 main().catch((error) => {
