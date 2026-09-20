@@ -10,7 +10,8 @@
     "sync-spec": "./scripts/sync-spec.sh",
     "dev": "bun --watch run src/index.ts",
     "start": "bun run src/index.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "bun test"
   },
   "keywords": [
     "mcp",

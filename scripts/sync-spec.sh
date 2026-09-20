@@ -30,3 +30,9 @@ for file in "${path_files[@]:-}"; do
 done
 
 echo "Synced $count Splitwise path specs to $PATHS_DIR"
+
+# These files define the expense request contracts used by body-schemas.ts.
+mkdir -p "$SPEC_DIR/schemas/expense"
+for file in common.yaml by_shares.yaml equal_group_split.yaml; do
+  curl -fLs "https://raw.githubusercontent.com/splitwise/api-docs/main/schemas/expense/$file" -o "$SPEC_DIR/schemas/expense/$file"
+done

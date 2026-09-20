@@ -13,7 +13,7 @@
  *   const me = await sw.call('get_current_user');
  *   const expenses = await sw.call('get_expenses', { limit: 10, group_id: 123 });
  *   const created = await sw.call('create_expense', {
- *     body: { cost: '25.00', description: 'Dinner', group_id: 123 },
+ *     body: { cost: '25.00', description: 'Dinner', group_id: 123, split_equally: true },
  *   });
  *
  * Requires env var: SPLITWISE_API_KEY (or SPLITWISE_ACCESS_TOKEN, etc.)
@@ -24,9 +24,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import YAML from 'yaml';
+import * as z from 'zod/v4';
+import { bodySchemas, flattenUsers } from './body-schemas.js';
 
 // ---------------------------------------------------------------------------
-// Types (from index.ts)
+// Types
 // ---------------------------------------------------------------------------
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'] as const;
@@ -73,7 +75,9 @@ export interface OperationSpec {
 }
 
 export interface ApiCallResult {
+  [key: string]: unknown;
   ok: boolean;
+  pagination?: { offset: number; returned: number; nextOffset: number | null };
   status: number;
   statusText: string;
   method: string;
@@ -105,7 +109,7 @@ function getAccessToken(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers (from index.ts)
+// Internal helpers
 // ---------------------------------------------------------------------------
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -191,10 +195,15 @@ function normalizeBodyInput(rawBody: unknown): JsonRecord {
       const params = new URLSearchParams(trimmed);
       const parsed: JsonRecord = {};
       for (const [k, v] of params.entries()) {
+        // Form encoding has no number/boolean types. Convert only documented
+        // typed fields; JSON/object inputs retain strict validation.
+        let value: string | number | boolean = v;
+        if (/^(group_id|user_id|expense_id|category_id|users__\d+__user_id)$/.test(k) && /^-?\d+$/.test(v)) value = Number(v);
+        if ((k === 'split_equally' || k === 'simplify_by_default') && (v === 'true' || v === 'false')) value = v === 'true';
         const existing = parsed[k];
-        if (existing === undefined) parsed[k] = v;
-        else if (Array.isArray(existing)) existing.push(v);
-        else parsed[k] = [existing, v];
+        if (existing === undefined) parsed[k] = value;
+        else if (Array.isArray(existing)) existing.push(value);
+        else parsed[k] = [existing, value];
       }
       return parsed;
     }
@@ -222,6 +231,8 @@ function parseResponseBody(contentType: string | null, rawText: string): unknown
 // ---------------------------------------------------------------------------
 
 async function callSplitwise(operation: OperationSpec, args: JsonRecord): Promise<ApiCallResult> {
+  if (args.body !== undefined) args = { ...args, body: normalizeBodyInput(args.body) };
+  args = buildInputSchema(operation).parse(args);
   const accessToken = getAccessToken();
   const resolvedPath = buildResolvedPath(operation, args);
   const url = new URL(`${SPLITWISE_BASE_URL}${resolvedPath}`);
@@ -245,7 +256,7 @@ async function callSplitwise(operation: OperationSpec, args: JsonRecord): Promis
     }
     if (body !== undefined) {
       headers['Content-Type'] = 'application/json';
-      init.body = JSON.stringify(normalizeBodyInput(body));
+      init.body = JSON.stringify(flattenUsers(normalizeBodyInput(body)));
     }
   }
 
@@ -254,7 +265,15 @@ async function callSplitwise(operation: OperationSpec, args: JsonRecord): Promis
   const parsedBody = parseResponseBody(response.headers.get('content-type'), responseText);
 
   return {
-    ok: response.ok,
+    ok: response.ok && !(isRecord(parsedBody) && (
+      parsedBody.success === false ||
+      (isRecord(parsedBody.errors) && Object.keys(parsedBody.errors).length > 0) ||
+      (Array.isArray(parsedBody.errors) && parsedBody.errors.length > 0)
+    )),
+    ...(operation.toolName === 'get_expenses' && response.ok && isRecord(parsedBody) && Array.isArray(parsedBody.expenses)
+      ? { pagination: { offset: Number(args.offset ?? 0), returned: parsedBody.expenses.length,
+          nextOffset: parsedBody.expenses.length ? Number(args.offset ?? 0) + parsedBody.expenses.length : null } }
+      : {}),
     status: response.status,
     statusText: response.statusText,
     method: init.method ?? operation.method.toUpperCase(),
@@ -268,7 +287,7 @@ async function callSplitwise(operation: OperationSpec, args: JsonRecord): Promis
 // Operation loading
 // ---------------------------------------------------------------------------
 
-async function loadOperations(): Promise<OperationSpec[]> {
+export async function loadOperations(): Promise<OperationSpec[]> {
   const repoRoot = getRepoRoot();
   const indexPath = join(repoRoot, 'spec', 'paths', 'index.yaml');
   const indexDoc = YAML.parse(await readFile(indexPath, 'utf8'));
@@ -340,6 +359,8 @@ export interface SplitwiseClient {
    *   console.log(result.data);
    */
   call(toolName: string, args?: Record<string, unknown>): Promise<ApiCallResult>;
+  /** Streams full expense records until an empty page. Throws on API failure or the page limit. */
+  expenses(args?: Record<string, unknown>, options?: { maxPages?: number }): AsyncGenerator<JsonRecord>;
 }
 
 /**
@@ -354,7 +375,7 @@ export async function createClient(): Promise<SplitwiseClient> {
   const operations = await loadOperations();
   const opsByName = new Map(operations.map((op) => [op.toolName, op]));
 
-  return {
+  const client: SplitwiseClient = {
     operations,
     call: async (toolName: string, args: Record<string, unknown> = {}) => {
       const op = opsByName.get(toolName);
@@ -364,5 +385,48 @@ export async function createClient(): Promise<SplitwiseClient> {
       }
       return callSplitwise(op, args);
     },
+    async *expenses(args = {}, options = {}) {
+      const maxPages = z.number().int().positive().parse(options.maxPages ?? 1000);
+      let offset = z.number().int().nonnegative().parse(args.offset ?? 0);
+      for (let page = 0; page < maxPages; page++) {
+        const result = await client.call('get_expenses', { ...args, offset });
+        if (!result.ok) throw new Error(`Splitwise expense request failed (${result.status}): ${JSON.stringify(result.data)}`);
+        if (!isRecord(result.data) || !Array.isArray(result.data.expenses)) throw new Error('Splitwise returned no expenses array.');
+        if (result.data.expenses.length === 0) return;
+        for (const expense of result.data.expenses) {
+          if (!isRecord(expense)) throw new Error('Splitwise returned an invalid expense.');
+          yield expense;
+        }
+        offset += result.data.expenses.length;
+      }
+      throw new Error(`Stopped after ${maxPages} expense pages. Increase maxPages or narrow the filters.`);
+    },
   };
+  return client;
+}
+
+/** Shared validation and MCP discovery schema. SDK string bodies are normalized before validation. */
+export function buildInputSchema(operation: OperationSpec, mcp = false): z.ZodObject {
+  const shape: Record<string, z.ZodType> = {};
+  for (const p of [...operation.pathParameters, ...operation.queryParameters]) {
+    let schema: z.ZodType = p.schemaType === 'integer' ? z.number().int()
+      : p.schemaType === 'number' ? z.number()
+      : p.schemaType === 'boolean' ? z.boolean() : z.string();
+    if (p.name === 'offset') schema = z.number().int().nonnegative();
+    if (p.name === 'limit') {
+      // A zero notification limit asks the API for its unbounded maximum.
+      schema = mcp ? z.number().int().min(1).max(100).default(20)
+        : operation.toolName === 'get_expenses' ? z.number().int().positive().default(20)
+        : z.number().int().nonnegative();
+    }
+    if (mcp && p.name === 'limit') schema = schema.describe('Records requested, from 1 to 100; defaults to 20. Use the SDK for bulk processing.');
+    else if (p.description) schema = schema.describe(p.description);
+    shape[p.name] = p.required || p.name === 'limit' && (mcp || operation.toolName === 'get_expenses') ? schema : schema.optional();
+  }
+  if (operation.hasBody) {
+    const body = bodySchemas[operation.toolName];
+    if (!body) throw new Error(`Missing request schema for ${operation.toolName}`);
+    shape.body = operation.bodyRequired ? body : body.optional();
+  }
+  return z.strictObject(shape);
 }
